@@ -65,10 +65,14 @@ class AssetsConfig:
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
     repo_id: str | None = None
+    # Local path to the dataset root directory. If provided, this will be used instead of downloading from HuggingFace.
+    local_dataset_root: str | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
     norm_stats: dict[str, _transforms.NormStats] | None = None
+    
+    root: str | None = None
 
     # Used to adopt the inputs from a dataset specific format to a common format
     # which is expected by the data transforms.
@@ -167,6 +171,9 @@ class ModelTransformFactory(GroupFactory):
 class DataConfigFactory(abc.ABC):
     # The LeRobot repo id.
     repo_id: str = tyro.MISSING
+    # Local directory path for the dataset. If provided, will load dataset
+    # from this local path instead of downloading from repo_id.
+    root: str | None = None
     # Determines how the assets will be loaded.
     assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
     # Base config that will be updated by the factory.
@@ -182,6 +189,8 @@ class DataConfigFactory(abc.ABC):
         return dataclasses.replace(
             self.base_config or DataConfig(),
             repo_id=repo_id,
+            root=self.root,
+            local_dataset_root=self.root,  # Also set local_dataset_root for backwards compatibility
             asset_id=asset_id,
             norm_stats=self._load_norm_stats(epath.Path(self.assets.assets_dir or assets_dirs), asset_id),
             use_quantile_norm=model_config.model_type != ModelType.PI0,
@@ -198,6 +207,42 @@ class DataConfigFactory(abc.ABC):
         except FileNotFoundError:
             logging.info(f"Norm stats not found in {data_assets_dir}, skipping.")
         return None
+    
+# @dataclasses.dataclass(frozen=True)
+# class DataConfigFactory(abc.ABC):
+#     # The LeRobot repo id.
+#     repo_id: str = tyro.MISSING
+#     # Determines how the assets will be loaded.
+#     assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
+#     # Base config that will be updated by the factory.
+#     base_config: tyro.conf.Suppress[DataConfig | None] = None
+
+#     @abc.abstractmethod
+#     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+#         """Create a data config."""
+
+#     def create_base_config(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+#         repo_id = self.repo_id if self.repo_id is not tyro.MISSING else None
+#         asset_id = self.assets.asset_id or repo_id
+#         return dataclasses.replace(
+#             self.base_config or DataConfig(),
+#             repo_id=repo_id,
+#             asset_id=asset_id,
+#             norm_stats=self._load_norm_stats(epath.Path(self.assets.assets_dir or assets_dirs), asset_id),
+#             use_quantile_norm=model_config.model_type != ModelType.PI0,
+#         )
+
+#     def _load_norm_stats(self, assets_dir: epath.Path, asset_id: str | None) -> dict[str, _transforms.NormStats] | None:
+#         if asset_id is None:
+#             return None
+#         try:
+#             data_assets_dir = str(assets_dir / asset_id)
+#             norm_stats = _normalize.load(_download.maybe_download(data_assets_dir))
+#             logging.info(f"Loaded norm stats from {data_assets_dir}")
+#             return norm_stats
+#         except FileNotFoundError:
+#             logging.info(f"Norm stats not found in {data_assets_dir}, skipping.")
+#         return None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -302,11 +347,14 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             inputs=[
                 _transforms.RepackTransform(
                     {
-                        "observation/image": "image",
-                        "observation/wrist_image": "wrist_image",
-                        "observation/state": "state",
-                        "actions": "actions",
-                        "prompt": "prompt",
+                        # Dataset only has observation.images.view1 video; use it for both base and wrist image.
+                        # "observation/image": "observation.images.view1",
+                        # "observation/wrist_image": "observation.images.view1",
+                        "observation/cam_high": "observation.images.cam_high",
+                        "observation/cam_left_wrist": "observation.images.cam_left_wrist",
+                        "observation/cam_right_wrist": "observation.images.cam_right_wrist",
+                        "observation/state": "observation.state",
+                        "actions": "action",
                     }
                 )
             ]
@@ -344,7 +392,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
         # Model transforms include things like tokenizing the prompt and action targets
         # You do not need to change anything here for your own dataset.
-        model_transforms = ModelTransformFactory()(model_config)
+        model_transforms = ModelTransformFactory(default_prompt="Insertion")(model_config)
 
         # We return all data transforms for training and inference. No need to change anything here.
         return dataclasses.replace(
@@ -761,6 +809,181 @@ _CONFIGS = [
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
     ),
+    
+    TrainConfig(
+        name="pi05_demospeedup",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        # data=LeRobotAlohaDataConfig(
+        #     repo_id="local/insert_wforce_subsampled",
+        #     assets=AssetsConfig(asset_id="trossen"),
+        #     default_prompt="insert with force",
+        #     base_config=DataConfig(
+        #         local_dataset_root="/home/e230112/WangLiangzi/DemoSpeedup/aloha/data/outputs/ACT_speedup_ckpt/lerobot_insert_wforce_subsampled",
+        #     ),
+        # ),
+        data=LeRobotLiberoDataConfig(
+            # 使用本地LeRobot数据集路径而不是HuggingFace Hub repo_id
+            # 将此路径替换为你的本地LeRobot数据集的实际路径
+            # 例如: "/path/to/local/dataset" 或 "username/local_dataset"
+            repo_id="physical-intelligence/insert_wforce_subsampled",
+            root="/home/e230112/WangLiangzi/DemoSpeedup/aloha/data/outputs/ACT_speedup_ckpt/lerobot_insert_wforce_subsampled",
+            base_config=DataConfig(
+                prompt_from_task=False,  # Use default_prompt in ModelTransformFactory instead
+                action_sequence_keys=("action",)
+            ),
+            extra_delta_transform=True,
+        ),
+        batch_size=32,  # Further reduced for FSDP + limited GPU memory
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=30_000,
+        fsdp_devices=1,  # Enable FSDP to shard model across 2 GPUs, reducing memory per GPU
+    ),
+    
+    TrainConfig(
+        name="pi05_zaijia_0215",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        data=LeRobotAlohaDataConfig(
+            # repo_id="R1_pour_0212_50_repo", 
+            # root="/home/e230112/.cache/huggingface/lerobot/R1_pour_0212_50_repo",
+            repo_id="R1_pnp_0218_55_rep", # R1_pour_0212_50_repo
+            root="/home/e230112/yzj/RoboTwin/policy/pi0/.cache/huggingface/lerobot/R1_pnp_0218_55_repo",
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                asset_id="trossen",
+            ),
+            # default_prompt="pour water",
+            default_prompt="pick up the banana and the pear, then place them on the plate",
+            adapt_to_pi=False,
+            use_delta_joint_actions=False,  # Actions are already in delta format
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys=("action",)
+            ),
+        ),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        fsdp_devices=1,
+    ),
+    
+    # TrainConfig(
+    #     name="pi05_zaijia",
+    #     model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+    #     # data=LeRobotAlohaDataConfig(
+    #     #     repo_id="local/insert_wforce_subsampled",
+    #     #     assets=AssetsConfig(asset_id="trossen"),
+    #     #     default_prompt="insert with force",
+    #     #     base_config=DataConfig(
+    #     #         local_dataset_root="/home/e230112/WangLiangzi/DemoSpeedup/aloha/data/outputs/ACT_speedup_ckpt/lerobot_insert_wforce_subsampled",
+    #     #     ),
+    #     # ),
+    #     data=LeRobotLiberoDataConfig(
+    #         # 使用本地LeRobot数据集路径而不是HuggingFace Hub repo_id
+    #         # 将此路径替换为你的本地LeRobot数据集的实际路径
+    #         # 例如: "/path/to/local/dataset" 或 "username/local_dataset"
+    #         repo_id="physical-intelligence/insert_wforce_subsampled",
+    #         root="/home/e230112/yzj/RoboTwin/policy/pi0/.cache/huggingface/lerobot/R1_pnp_0212_55_repo",
+    #         # root="/home/e230112/.cache/huggingface/lerobot/R1_pnp_0212_55_repo",
+    #         base_config=DataConfig(
+    #             prompt_from_task=False,  # Use default_prompt in ModelTransformFactory instead
+    #             # action_sequence_keys=("action",)
+    #         ),
+    #         extra_delta_transform=True,
+    #         repack_transforms=_transforms.Group(inputs=[
+    #             _transforms.RepackTransform({
+    #                 "images": {
+    #                     "cam_high": "observation.images.cam_high",
+    #                     "cam_left_wrist": "observation.images.cam_left_wrist",
+    #                     "cam_right_wrist": "observation.images.cam_right_wrist",
+    #                 },
+    #                 "state": "observation.state",
+    #                 "actions": "action",
+    #                 "prompt": "prompt",
+    #             })
+    #         ]),
+    #     ),
+    #     batch_size=32,  # Further reduced for FSDP + limited GPU memory
+    #     lr_schedule=_optimizer.CosineDecaySchedule(
+    #         warmup_steps=10_000,
+    #         peak_lr=5e-5,
+    #         decay_steps=1_000_000,
+    #         decay_lr=5e-5,
+    #     ),
+    #     optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+    #     ema_decay=0.999,
+    #     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+    #     pytorch_weight_path="/path/to/your/pytorch_weight_path",
+    #     num_train_steps=30_000,
+    #     fsdp_devices=1,  # Enable FSDP to shard model across 2 GPUs, reducing memory per GPU
+    # ),
+
+   # pi0_base by FULL PNP 55条
+    TrainConfig(
+        name="R1_Full-FT_pnp_0212_55_lora", 
+        model=pi0_config.Pi0Config(),
+        data=LeRobotAlohaDataConfig(
+            repo_id="R1_pnp_0212_55_repo",  # your datasets repo_id
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                })
+            ]),
+            base_config=DataConfig(
+                prompt_from_task=True,  # Set to True for prompt by task_name
+            ),
+        ),
+        freeze_filter=pi0_config.Pi0Config().get_freeze_filter(),
+        # batch_size=32,  # the total batch_size not pre_gpu batch_size
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        # num_train_steps=30000,
+        # fsdp_devices=1,  # refer line 359
+        num_train_steps=20000,
+        save_interval= 1000, # 5000 # 5000
+        keep_period= 1000, # 5000 # 1000
+        batch_size=32,  
+        fsdp_devices=1,  # refer line 359
+    ),
+
     #
     # Fine-tuning Aloha configs.
     #

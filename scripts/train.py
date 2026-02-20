@@ -227,11 +227,29 @@ def main(config: _config.TrainConfig):
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
     # Log images from first batch to sanity check.
-    images_to_log = [
-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
-        for i in range(min(5, len(next(iter(batch[0].images.values())))))
-    ]
-    wandb.log({"camera_views": images_to_log}, step=0)
+    try:
+        # Move images to CPU and convert format for logging
+        images_cpu = jax.device_get(batch[0].images)
+        num_images_to_log = min(5, len(next(iter(images_cpu.values()))))
+        images_to_log = []
+        for i in range(num_images_to_log):
+            # Concatenate images from all cameras for this batch element
+            img_list = []
+            for img in images_cpu.values():
+                # Convert from (C,H,W) float32 to (H,W,C) uint8
+                img_i = img[i]  # (C,H,W)
+                if img_i.shape[0] == 3:  # CHW format
+                    img_i = np.transpose(img_i, (1, 2, 0))  # -> (H,W,C)
+                # Convert to uint8 if needed
+                if img_i.dtype != np.uint8:
+                    img_i = np.clip(img_i * 255, 0, 255).astype(np.uint8)
+                img_list.append(img_i)
+            # Concatenate horizontally
+            concat_img = np.concatenate(img_list, axis=1)
+            images_to_log.append(wandb.Image(concat_img))
+        wandb.log({"camera_views": images_to_log}, step=0)
+    except Exception as e:
+        logging.warning(f"Failed to log images: {e}")
 
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
     jax.block_until_ready(train_state)

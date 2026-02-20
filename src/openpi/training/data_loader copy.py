@@ -5,12 +5,9 @@ import os
 import typing
 from typing import Literal, Protocol, SupportsIndex, TypeVar
 
-import unittest.mock
-
 import jax
 import jax.numpy as jnp
 import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
-import lerobot.common.datasets.utils as _lerobot_utils
 import numpy as np
 import torch
 
@@ -140,32 +137,26 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    # When using a local dataset root, set HF_HUB_OFFLINE to prevent fallback downloads from HuggingFace.
-    old_hf_offline = os.environ.get("HF_HUB_OFFLINE")
-    if data_config.root is not None:
-        os.environ["HF_HUB_OFFLINE"] = "1"
-
-    try:
-        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=data_config.root)
-        # Monkey-patch check_timestamps_sync to skip it for subsampled/local datasets
-        # where timestamps are not strictly uniform.
-        with unittest.mock.patch.object(lerobot_dataset, "check_timestamps_sync", lambda *a, **kw: True):
-            dataset = lerobot_dataset.LeRobotDataset(
-                data_config.repo_id,
-                root=data_config.root,
-                delta_timestamps={
-                    key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-                },
-                tolerance_s=1e10,  # Large tolerance for delta_timestamps check too.
-                video_backend="pyav",  # Use PyAV instead of TorchCodec
-            )
-    finally:
-        # Restore original HF_HUB_OFFLINE setting.
-        if data_config.root is not None:
-            if old_hf_offline is None:
-                os.environ.pop("HF_HUB_OFFLINE", None)
-            else:
-                os.environ["HF_HUB_OFFLINE"] = old_hf_offline
+    # Support for local datasets
+    # Check both local_dataset_root and root for backwards compatibility
+    local_root = data_config.local_dataset_root or data_config.root
+    if local_root is not None:
+        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=local_root)
+        dataset = lerobot_dataset.LeRobotDataset(
+            repo_id,
+            root=local_root,
+            delta_timestamps={
+                key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+            },
+        )
+    else:
+        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+        dataset = lerobot_dataset.LeRobotDataset(
+            data_config.repo_id,
+            delta_timestamps={
+                key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+            },
+        )
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
@@ -187,7 +178,7 @@ def create_rlds_dataset(
         shuffle=shuffle,
         action_chunk_size=action_horizon,
         action_space=data_config.action_space,
-        filter_dict_path=data_config.filter_dict_path,
+        datasets=data_config.datasets,
     )
 
 
